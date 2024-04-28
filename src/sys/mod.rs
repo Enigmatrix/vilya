@@ -17,7 +17,7 @@ mod bindings {
 pub use bindings::*;
 
 use core::ffi;
-use std::io;
+use std::{io, usize};
 
 fn resultify(ret: ffi::c_int) -> io::Result<ffi::c_int> {
     if ret >= 0 {
@@ -66,4 +66,32 @@ pub unsafe fn io_uring_enter(
         arg as usize,
         size,
     ) as _)
+}
+
+pub unsafe fn mmap(
+    addr: *mut ffi::c_void,
+    len: usize,
+    prot: ffi::c_int,
+    flags: ffi::c_int,
+    fd: ffi::c_int,
+    offset: isize,
+) -> io::Result<*mut ffi::c_void> {
+    match sc::syscall6(
+        __NR_mmap as usize,
+        addr as usize,
+        len as usize,
+        prot as usize,
+        flags as usize,
+        fd as usize,
+        offset as usize,
+    ) {
+        // MAP_FAILED doesn't seem to be defined in the headers
+        usize::MAX => Err(io::Error::last_os_error()),
+        addr => Ok(addr as *mut ffi::c_void),
+    }
+}
+
+pub unsafe fn munmap(addr: *mut ffi::c_void, len: usize) -> io::Result<()> {
+    resultify(sc::syscall2(__NR_mmap as usize, addr as usize, len as usize) as _)?;
+    Ok(())
 }

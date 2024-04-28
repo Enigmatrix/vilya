@@ -11,6 +11,7 @@ fn main() {
     const INCLUDE: &str = r#"
 #include <unistd.h>
 #include <sys/syscall.h>
+#include <linux/mman.h>
 #include <linux/time_types.h>
 #include <linux/stat.h>
 #include <linux/openat2.h>
@@ -42,7 +43,7 @@ fn main() {
         .generate_comments(true)
         .use_core()
         .allowlist_type("io_uring_.*|io_.qring_.*|__kernel_timespec|open_how|futex_waitv")
-        .allowlist_var("__NR_io_uring.*|IOSQE_.*|IORING_.*|IO_URING_.*|SPLICE_F_FD_IN_FIXED")
+        .allowlist_var("__NR_io_uring.*|IOSQE_.*|IORING_.*|IO_URING_.*|SPLICE_F_FD_IN_FIXED|MAP_.*|PROT_.*|__NR_mmap|__NR_munmap")
         .generate()
         .unwrap()
         .write_to_file(outdir.join("sys.rs"))
