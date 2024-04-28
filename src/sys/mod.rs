@@ -16,10 +16,13 @@ mod bindings {
 
 pub use bindings::*;
 
-use core::ffi;
-use std::{io, usize};
+use std::io;
+pub use std::os::fd::RawFd;
 
-fn resultify(ret: ffi::c_int) -> io::Result<ffi::c_int> {
+pub use core::ffi::*;
+pub type off_t = isize;
+
+fn resultify(ret: c_int) -> io::Result<c_int> {
     if ret >= 0 {
         Ok(ret)
     } else {
@@ -28,11 +31,11 @@ fn resultify(ret: ffi::c_int) -> io::Result<ffi::c_int> {
 }
 
 pub unsafe fn io_uring_register(
-    fd: ffi::c_int,
-    opcode: ffi::c_uint,
-    arg: *const ffi::c_void,
-    nr_args: ffi::c_uint,
-) -> io::Result<ffi::c_int> {
+    fd: c_int,
+    opcode: c_uint,
+    arg: *const c_void,
+    nr_args: c_uint,
+) -> io::Result<c_int> {
     resultify(sc::syscall4(
         __NR_io_uring_register as usize,
         fd as usize,
@@ -42,21 +45,18 @@ pub unsafe fn io_uring_register(
     ) as _)
 }
 
-pub unsafe fn io_uring_setup(
-    entries: ffi::c_uint,
-    p: *mut io_uring_params,
-) -> io::Result<ffi::c_int> {
+pub unsafe fn io_uring_setup(entries: c_uint, p: *mut io_uring_params) -> io::Result<RawFd> {
     resultify(sc::syscall2(__NR_io_uring_setup as usize, entries as usize, p as usize) as _)
 }
 
 pub unsafe fn io_uring_enter(
-    fd: ffi::c_int,
-    to_submit: ffi::c_uint,
-    min_complete: ffi::c_uint,
-    flags: ffi::c_uint,
-    arg: *const ffi::c_void,
+    fd: c_int,
+    to_submit: c_uint,
+    min_complete: c_uint,
+    flags: c_uint,
+    arg: *const c_void,
     size: usize,
-) -> io::Result<ffi::c_int> {
+) -> io::Result<c_int> {
     resultify(sc::syscall6(
         __NR_io_uring_enter as usize,
         fd as usize,
@@ -69,13 +69,13 @@ pub unsafe fn io_uring_enter(
 }
 
 pub unsafe fn mmap(
-    addr: *mut ffi::c_void,
+    addr: *mut c_void,
     len: usize,
-    prot: ffi::c_int,
-    flags: ffi::c_int,
-    fd: ffi::c_int,
-    offset: isize,
-) -> io::Result<*mut ffi::c_void> {
+    prot: c_int,
+    flags: c_int,
+    fd: c_int,
+    offset: off_t,
+) -> io::Result<*mut c_void> {
     match sc::syscall6(
         __NR_mmap as usize,
         addr as usize,
@@ -87,11 +87,11 @@ pub unsafe fn mmap(
     ) {
         // MAP_FAILED doesn't seem to be defined in the headers
         usize::MAX => Err(io::Error::last_os_error()),
-        addr => Ok(addr as *mut ffi::c_void),
+        addr => Ok(addr as *mut c_void),
     }
 }
 
-pub unsafe fn munmap(addr: *mut ffi::c_void, len: usize) -> io::Result<()> {
+pub unsafe fn munmap(addr: *mut c_void, len: usize) -> io::Result<()> {
     resultify(sc::syscall2(__NR_mmap as usize, addr as usize, len as usize) as _)?;
     Ok(())
 }
