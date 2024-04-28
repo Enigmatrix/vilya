@@ -8,6 +8,7 @@ overwrite = [ "bindgen" ]
 bindgen = [ "dep:bindgen" ]
 
 [dependencies]
+sc = "0.2.7"
 
 [build-dependencies]
 bindgen = { version = "0.69", optional = true }
