@@ -3,4 +3,11 @@ name = "vilya"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+overwrite = [ "bindgen" ]
+bindgen = [ "dep:bindgen" ]
+
 [dependencies]
+
+[build-dependencies]
+bindgen = { version = "0.69", optional = true }
