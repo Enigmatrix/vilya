@@ -1,10 +1,11 @@
 mod sys;
+use std::collections::VecDeque;
 use std::future::Future;
 use std::sync::Arc;
-use std::sync::{Mutex, TryLockError};
 use std::task::{Poll, Waker};
 
 use io_uring::squeue::Entry;
+use parking_lot::{Mutex, RwLock};
 use std::cell::RefCell;
 use sys::{io_uring_sqe, IORING_OP_READ};
 
@@ -43,6 +44,8 @@ pub struct Read<'a> {
     state: CompletionRef,
 }
 
+pub const NR_CPU: usize = 16;
+
 pub fn process_uring() {
     // println!("parked id={:?}", std::thread::current().id());
     RING.with(|ring| {
@@ -55,6 +58,17 @@ pub fn process_uring() {
             // println!("CQE, result={:?}, data={:x?}", cq.result(), user_data);
             set_result(user_data, res);
         }
+        
+        // TODO expect lots of contention
+        let mut wakers = WAITING_WAKERS.upgradable_read();
+        if !wakers.is_empty() {
+            wakers.with_upgraded(|wakers| {
+                let len = (NR_CPU*NR_CPU).min(wakers.len());
+                //let len = 1;
+                wakers.drain(..len).for_each(|waker| waker.wake())
+            })
+        }
+        
     });
     // println!("exiting park...")
 }
@@ -65,7 +79,7 @@ pub fn set_result(user_data: u64, result: i32) {
     let prev_state = {
         let state = unsafe { Arc::from_raw(user_data as *const Mutex<CompletionState>) };
         // expect very little contention
-        let mut lock = state.lock().expect("mutex not poisoned");
+        let mut lock = state.lock();
         let prev_state = std::mem::replace(&mut *lock, CompletionState::Completed { result });
         prev_state
     };
@@ -114,9 +128,8 @@ impl Future for Read<'_> {
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Self::Output> {
         let mut lock = match self.state.inner.try_lock() {
-            Ok(lock) => lock,
-            Err(TryLockError::WouldBlock) => return Poll::Pending,
-            Err(e) => panic!("mutex poisoned?"),
+            Some(lock) => lock,
+            None => return Poll::Pending,
         };
 
         match &*lock {
@@ -133,12 +146,15 @@ impl Future for Read<'_> {
                 // global...
                 // maybe we can call process_uring after a certain threshold of waiting occurs? so need to store wait count
                 // in the Waiting state
-                while let Err(_) =
+                if let Err(_) =
                     RING.with_borrow_mut(|ring| unsafe { ring.submission().push(&entry) })
                 {
                     // can't push now, try again later
-                    // println!("push failed, threadid={:?}", std::thread::current().id());
-                    process_uring();
+                    // process_uring();
+                    let mut wakers = WAITING_WAKERS.write();
+                    wakers.push_back(cx.waker().clone());
+
+                    return Poll::Pending;
                 }
                 *lock = CompletionState::InProgress(cx.waker().clone());
                 Poll::Pending
@@ -152,6 +168,8 @@ impl Future for Read<'_> {
 thread_local! {
     pub static RING: RefCell<io_uring::IoUring> = RefCell::new(io_uring::IoUring::new(1000).expect("io_uring"));
 }
+
+pub static WAITING_WAKERS: RwLock<VecDeque<Waker>> = RwLock::new(VecDeque::new());
 
 struct Never;
 
@@ -288,7 +306,7 @@ mod tests {
         // can't run async stuff in the main block_on as it's not a worker thread - so no parking!
         let file = File::open("Cargo.toml").expect("open");
         let fd = file.as_raw_fd();
-        let stress = 1_000_000;
+        let stress = 10_000_000;
         rt.block_on(async move {
             tokio::spawn(async move {
                 let mut wg = WaitGroup::new();

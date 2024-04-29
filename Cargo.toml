@@ -9,6 +9,7 @@ bindgen = [ "dep:bindgen" ]
 
 [dependencies]
 io-uring = "0.6.4"
+parking_lot = "0.12.2"
 
 [build-dependencies]
 bindgen = { version = "0.69", optional = true }
