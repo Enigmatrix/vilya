@@ -1,8 +1,8 @@
-mod sys;
+use core::panic;
 use std::collections::VecDeque;
 use std::future::Future;
-use std::os::fd::RawFd;
 use std::os::fd::AsRawFd;
+use std::os::fd::RawFd;
 use std::sync::Arc;
 use std::task::{Poll, Waker};
 
@@ -11,6 +11,10 @@ use io_uring::squeue::Entry;
 use parking_lot::{Mutex, RwLock};
 use std::cell::RefCell;
 use sys::{io_uring_sqe, IORING_OP_READ};
+
+mod future;
+mod rt;
+mod sys;
 
 /// # Safety
 /// This function is safe since Entry is internally a io_uring_sqe,
@@ -129,12 +133,7 @@ impl Future for Read<'_> {
         self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Self::Output> {
-        let mut lock = match self.state.inner.try_lock() {
-            Some(lock) => lock,
-            // TODO there might be a race cond here: if the waker is woken up before we get the lock,
-            // then we might miss the waker.
-            None => return Poll::Pending,
-        };
+        let mut lock = self.state.inner.lock();
 
         match &*lock {
             CompletionState::Unstarted => {
@@ -162,7 +161,7 @@ impl Future for Read<'_> {
                 *lock = CompletionState::InProgress(cx.waker().clone());
                 Poll::Pending
             }
-            CompletionState::InProgress(_) => Poll::Pending,
+            CompletionState::InProgress(_) => unreachable!(),
             CompletionState::Completed { result } => {
                 if *result < 0 {
                     Poll::Ready(Err(std::io::Error::from_raw_os_error(-*result as i32)))
