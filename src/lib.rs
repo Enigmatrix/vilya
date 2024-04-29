@@ -166,7 +166,7 @@ impl Future for Read<'_> {
 }
 
 thread_local! {
-    pub static RING: RefCell<io_uring::IoUring> = RefCell::new(io_uring::IoUring::new(1000).expect("io_uring"));
+    pub static RING: RefCell<io_uring::IoUring> = RefCell::new(io_uring::IoUring::builder().setup_single_issuer().build(0x4000).expect("io_uring"));
 }
 
 pub static WAITING_WAKERS: RwLock<VecDeque<Waker>> = RwLock::new(VecDeque::new());
