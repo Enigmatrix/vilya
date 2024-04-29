@@ -1,15 +1,11 @@
 mod sys;
 use std::future::Future;
-use std::io::ErrorKind;
-use std::ops::{Deref, DerefMut};
+use std::sync::Arc;
 use std::sync::{Mutex, TryLockError};
 use std::task::{Poll, Waker};
-use std::{mem::zeroed, sync::Arc};
-use std::borrow::BorrowMut;
-use std::borrow::Borrow;
 
+use io_uring::squeue::Entry;
 use std::cell::RefCell;
-use io_uring::{opcode, squeue::Entry};
 use sys::{io_uring_sqe, IORING_OP_READ};
 
 /// # Safety
@@ -35,7 +31,6 @@ impl CompletionRef {
             inner: Arc::new(Mutex::new(CompletionState::Unstarted)),
         }
     }
-    
 }
 
 pub struct Read<'a> {
@@ -45,8 +40,23 @@ pub struct Read<'a> {
     // TODO builder pattern to set common fields like flags,
     // rw_flags, ioprio. Maybe a macro to insert it into Write etc as well.
     // Or atleast a common struct...
-
     state: CompletionRef,
+}
+
+pub fn process_uring() {
+    // println!("parked id={:?}", std::thread::current().id());
+    RING.with(|ring| {
+        let mut ring = ring.borrow_mut();
+        let s = ring.submit().expect("submit");
+        // println!("submitted {s}");
+        for cq in ring.completion() {
+            let res = cq.result();
+            let user_data = cq.user_data();
+            // println!("CQE, result={:?}, data={:x?}", cq.result(), user_data);
+            set_result(user_data, res);
+        }
+    });
+    // println!("exiting park...")
 }
 
 // call this for each cqe received
@@ -69,20 +79,25 @@ pub fn set_result(user_data: u64, result: i32) {
 
 impl<'a> Read<'a> {
     pub fn new(fd: i32, buf: &'a mut [u8], offset: u64) -> Self {
-        Self { fd, buf, offset, state: CompletionRef::new() }
+        Self {
+            fd,
+            buf,
+            offset,
+            state: CompletionRef::new(),
+        }
     }
 
     pub fn build(&self) -> io_uring_sqe {
         let mut sqe: io_uring_sqe = Default::default();
         sqe.opcode = IORING_OP_READ as _;
         sqe.fd = self.fd; // TODO this could be fixed fd as well
-        // sqe.ioprio = ioprio;
+                          // sqe.ioprio = ioprio;
         sqe.__bindgen_anon_2.addr = self.buf.as_ptr() as _;
         sqe.len = self.buf.len() as _;
         sqe.__bindgen_anon_1.off = self.offset;
         // sqe.__bindgen_anon_3.rw_flags = rw_flags;
         // sqe.__bindgen_anon_4.buf_group = buf_group;
-        
+
         let state_clone = self.state.inner.clone();
         let state_clone_ptr = Arc::into_raw(state_clone);
         sqe.user_data = state_clone_ptr as _;
@@ -94,29 +109,42 @@ impl<'a> Read<'a> {
 impl Future for Read<'_> {
     type Output = std::io::Result<i32>;
 
-    fn poll(self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<Self::Output> {
+    fn poll(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
         let mut lock = match self.state.inner.try_lock() {
             Ok(lock) => lock,
             Err(TryLockError::WouldBlock) => return Poll::Pending,
-            Err(e) => panic!("mutex poisoned?")
+            Err(e) => panic!("mutex poisoned?"),
         };
-        
+
         match &*lock {
             CompletionState::Unstarted => {
                 let entry = to_entry(self.build());
-                println!("pushing entry threadid={:?}", std::thread::current().id());
-                if let Err(e) = RING.with_borrow_mut(|ring| unsafe { ring.submission().push(&entry) }) {
-                    return Poll::Ready(Err(std::io::Error::new(ErrorKind::Other, e)));
+                // println!("pushing entry threadid={:?}", std::thread::current().id());
+                // TODO EW blocking.... and possible deadlock since thread won't get parked like this?
+                //
+                // how about we hold an vector of wakers on the uring side, and if we can't push,
+                // we push the waker to the vector, then return Pending. When we can process shit on the io_uring side,
+                // then we wake up some wakers (just one? multiple of NR_CPU? or maybe NR_CPU*NR_CPU, or just all?)
+                // This means that we need to hold a new CompletionState enum like CompletionState::Waiting to hold the
+                // Entry (otherwise we might keep calling build, ew...). Note that the vector of wakers might need to be
+                // global...
+                // maybe we can call process_uring after a certain threshold of waiting occurs? so need to store wait count
+                // in the Waiting state
+                while let Err(_) =
+                    RING.with_borrow_mut(|ring| unsafe { ring.submission().push(&entry) })
+                {
+                    // can't push now, try again later
+                    // println!("push failed, threadid={:?}", std::thread::current().id());
+                    process_uring();
                 }
                 *lock = CompletionState::InProgress(cx.waker().clone());
                 Poll::Pending
             }
-            CompletionState::InProgress(_) => {
-                Poll::Pending
-            },
-            CompletionState::Completed { result } => {
-                Poll::Ready(Ok(*result))
-            },
+            CompletionState::InProgress(_) => Poll::Pending,
+            CompletionState::Completed { result } => Poll::Ready(Ok(*result)),
         }
     }
 }
@@ -130,7 +158,10 @@ struct Never;
 impl Future for Never {
     type Output = ();
 
-    fn poll(self: std::pin::Pin<&mut Self>, _: &mut std::task::Context<'_>) -> std::task::Poll<Self::Output> {
+    fn poll(
+        self: std::pin::Pin<&mut Self>,
+        _: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
         Poll::Pending
     }
 }
@@ -165,14 +196,12 @@ impl Future for Never {
 //     Ok(())
 // }
 
-
 #[cfg(test)]
 mod tests {
-    use std::{
-        error::Error, fs::File, io::{Seek}, os::fd::AsRawFd
-    };
+    use std::{error::Error, fs::File, io::Seek, os::fd::AsRawFd};
 
-    use futures::{future, stream::FuturesUnordered, StreamExt};
+    use awaitgroup::WaitGroup;
+    use futures::{stream::FuturesUnordered, StreamExt};
 
     use super::*;
 
@@ -183,7 +212,7 @@ mod tests {
         let file = File::open("Cargo.toml")?;
         let read = Read::new(file.as_raw_fd(), &mut buf, 0);
         let read_entry = to_entry(read.build());
-        
+
         unsafe { ring.submission().push(&read_entry)? }
         ring.submit_and_wait(1)?;
         let entry = ring.completion().next().expect("one read entry");
@@ -195,21 +224,23 @@ mod tests {
         assert!(buf.contains("vilya"), "io_uring read failed");
         Ok(())
     }
-    
+
     async fn read_cargo() -> Result<(), Box<dyn Send + Error>> {
         let mut buf = [0; 1024];
         let mut file = File::open("Cargo.toml").expect("open");
         let len = file.metadata().expect("metadata").len() as usize;
         let fd = file.as_raw_fd();
-        let futs: FuturesUnordered<_> = (0..len).map(|i| {
-            let fut = async move {
-                let mut b = [0; 1];
-                let read = Read::new(fd, &mut b, i as u64);
-                read.await.expect("read");
-                (i, b)
-            };
-            tokio::spawn(fut)
-        }).collect();
+        let futs: FuturesUnordered<_> = (0..len)
+            .map(|i| {
+                let fut = async move {
+                    let mut b = [0; 1];
+                    let read = Read::new(fd, &mut b, i as u64);
+                    read.await.expect("read");
+                    (i, b)
+                };
+                tokio::spawn(fut)
+            })
+            .collect();
         let res = futs.collect::<Vec<_>>().await;
         res.into_iter().for_each(|res| {
             //let (i, b) = res;
@@ -221,42 +252,60 @@ mod tests {
         let mut fbuf = Vec::new();
         let flen = {
             use std::io::Read;
-            file.seek(std::io::SeekFrom::Start(0)).expect("seek to start");
+            file.seek(std::io::SeekFrom::Start(0))
+                .expect("seek to start");
             file.read_to_end(&mut fbuf).expect("fread")
         };
         assert_eq!(len, flen);
         assert!(buf == &fbuf[..flen], "io_uring read failed");
         Ok(())
     }
-    
+
     #[test]
     fn lmao_test() -> Result<(), Box<dyn Error>> {
         let rt = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(16)
-            .on_thread_park(|| {
-                println!("parked id={:?}", std::thread::current().id());
-                RING.with(|ring| {
-                    let mut ring = ring.borrow_mut();
-                    let s = ring.submit().expect("submit");
-                    println!("submitted {s}");
-                    for cq in ring.completion() {
-                        let res = cq.result();
-                        let user_data = cq.user_data();
-                        println!("CQE, result={:?}, data={:x?}", cq.result(), user_data);
-                        set_result(user_data, res);
-                    }
-                });
-                println!("exiting park...")
-            })
+            .on_thread_park(|| process_uring())
             .build()?;
 
-        println!("starting... id={:?}", std::thread::current().id());
+        // println!("starting... id={:?}", std::thread::current().id());
         // can't run async stuff in the main block_on as it's not a worker thread - so no parking!
-        let w= rt.block_on(async move {
-            tokio::spawn(read_cargo()).await
-        })?;
+        let w = rt.block_on(async move { tokio::spawn(read_cargo()).await })?;
         w.expect("what");
         Ok(())
     }
 
+    #[test]
+    fn stress_test() -> Result<(), Box<dyn Error>> {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .on_thread_park(|| {
+                process_uring();
+            })
+            .build()?;
+
+        // println!("starting... id={:?}", std::thread::current().id());
+        // can't run async stuff in the main block_on as it's not a worker thread - so no parking!
+        let file = File::open("Cargo.toml").expect("open");
+        let fd = file.as_raw_fd();
+        let stress = 1_000_000;
+        rt.block_on(async move {
+            tokio::spawn(async move {
+                let mut wg = WaitGroup::new();
+                (0..stress).for_each(|_| {
+                    let worker = wg.worker();
+                    let fut = async move {
+                        let mut b = [0; 1];
+                        let read = Read::new(fd, &mut b, 0);
+                        assert_eq!(1, read.await.expect("read"));
+                        worker.done();
+                    };
+                    tokio::spawn(fut);
+                });
+                wg.wait().await;
+            })
+            .await
+        })?;
+        Ok(())
+    }
 }
