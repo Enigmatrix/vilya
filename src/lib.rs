@@ -6,6 +6,7 @@ use std::os::fd::AsRawFd;
 use std::sync::Arc;
 use std::task::{Poll, Waker};
 
+use crossbeam_queue::SegQueue;
 use io_uring::squeue::Entry;
 use parking_lot::{Mutex, RwLock};
 use std::cell::RefCell;
@@ -62,13 +63,13 @@ pub fn process_uring() {
         }
 
         // TODO expect lots of contention
-        let mut wakers = WAITING_WAKERS.upgradable_read();
-        if !wakers.is_empty() {
-            wakers.try_with_upgraded(|wakers| {
-                let len = (NR_CPU * NR_CPU).min(wakers.len());
-                //let len = 1;
-                wakers.drain(..len).for_each(|waker| waker.wake())
-            });
+        let max_size = NR_CPU * NR_CPU;
+        for _ in 0..max_size {
+            if let Some(waker) = WAITING_WAKERS.pop() {
+                waker.wake();
+            } else {
+                break;
+            }
         }
     });
     // println!("exiting park...")
@@ -154,8 +155,7 @@ impl Future for Read<'_> {
                 {
                     // can't push now, try again later
                     // process_uring();
-                    let mut wakers = WAITING_WAKERS.write();
-                    wakers.push_back(cx.waker().clone());
+                    WAITING_WAKERS.push(cx.waker().clone());
 
                     return Poll::Pending;
                 }
@@ -196,7 +196,7 @@ thread_local! {
 }
 
 pub static mut SHARED_RING_FD: Mutex<Option<RawFd>> = Mutex::new(None);
-pub static WAITING_WAKERS: RwLock<VecDeque<Waker>> = RwLock::new(VecDeque::new());
+pub static WAITING_WAKERS: SegQueue<Waker> = SegQueue::new();
 
 struct Never;
 
