@@ -135,34 +135,35 @@ impl Future for Never {
     }
 }
 
-#[test]
-fn never_test() -> Result<(), Box<dyn std::error::Error>> {
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(2)
-        .on_thread_park(|| {
-            println!("parking, id={:?}", std::thread::current().id());
-        })
-        .build()?;
+// this timesout as the main block_on thread does not park
+// #[test]
+// fn never_test() -> Result<(), Box<dyn std::error::Error>> {
+//     let rt = tokio::runtime::Builder::new_multi_thread()
+//         .worker_threads(2)
+//         .on_thread_park(|| {
+//             println!("parking, id={:?}", std::thread::current().id());
+//         })
+//         .build()?;
 
-    println!("main thread, id={:?}", std::thread::current().id());
-    async fn wrapper<'a>(never: Never) {
-        println!("running, id={:?}", std::thread::current().id());
-        never.await;
-    }
-    rt.block_on(async move {
-        // wrappers are scheduled onto thread 3/4
-        tokio::spawn(wrapper(Never));
-        tokio::spawn(wrapper(Never));
-        tokio::spawn(wrapper(Never));
-        tokio::spawn(wrapper(Never));
-        tokio::spawn(wrapper(Never));
-        tokio::spawn(wrapper(Never));
-        tokio::spawn(wrapper(Never));
-        tokio::spawn(wrapper(Never));
-        wrapper(Never).await;
-    });
-    Ok(())
-}
+//     println!("main thread, id={:?}", std::thread::current().id());
+//     async fn wrapper<'a>(never: Never) {
+//         println!("running, id={:?}", std::thread::current().id());
+//         never.await;
+//     }
+//     rt.block_on(async move {
+//         // wrappers are scheduled onto thread 3/4
+//         tokio::spawn(wrapper(Never));
+//         tokio::spawn(wrapper(Never));
+//         tokio::spawn(wrapper(Never));
+//         tokio::spawn(wrapper(Never));
+//         tokio::spawn(wrapper(Never));
+//         tokio::spawn(wrapper(Never));
+//         tokio::spawn(wrapper(Never));
+//         tokio::spawn(wrapper(Never));
+//         wrapper(Never).await;
+//     });
+//     Ok(())
+// }
 
 
 #[cfg(test)]
