@@ -130,6 +130,8 @@ impl Future for Read<'_> {
     ) -> std::task::Poll<Self::Output> {
         let mut lock = match self.state.inner.try_lock() {
             Some(lock) => lock,
+            // TODO there might be a race cond here: if the waker is woken up before we get the lock,
+            // then we might miss the waker.
             None => return Poll::Pending,
         };
 
