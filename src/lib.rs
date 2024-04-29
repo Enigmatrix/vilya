@@ -3,6 +3,7 @@ use std::collections::VecDeque;
 use std::future::Future;
 use std::os::fd::AsRawFd;
 use std::os::fd::RawFd;
+use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 use std::task::{Poll, Waker};
 
@@ -53,11 +54,20 @@ pub struct Read<'a> {
 
 pub const NR_CPU: usize = 16;
 
+pub static INTER: AtomicUsize = AtomicUsize::new(0);
+
 pub fn process_uring() {
     // println!("parked id={:?}", std::thread::current().id());
     RING.with(|ring| {
         let mut ring = ring.borrow_mut();
-        let s = ring.submit().expect("submit");
+
+        // let len = ring.submission().len() as u32;
+        // if len != 0 {
+        //     let s = unsafe { ring.submitter().enter::<()>(len, 0, sys::IORING_ENTER_SQ_WAIT, None) }.expect("submit");
+        // }
+        
+        ring.submit().expect("submit");
+        INTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         // println!("submitted {s}");
         for cq in ring.completion() {
             let res = cq.result();
@@ -332,7 +342,7 @@ mod tests {
         // can't run async stuff in the main block_on as it's not a worker thread - so no parking!
         let file = File::open("Cargo.toml").expect("open");
         let fd = file.as_raw_fd();
-        let stress = 10_000_000;
+        let stress = 2_000_000;
         rt.block_on(async move {
             tokio::spawn(async move {
                 let mut wg = WaitGroup::new();
@@ -350,6 +360,9 @@ mod tests {
             })
             .await
         })?;
+        let acc = INTER.load(std::sync::atomic::Ordering::Relaxed);
+        println!("acc={:?}", acc);
         Ok(())
     }
+
 }
