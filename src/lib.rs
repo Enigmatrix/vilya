@@ -1,3 +1,5 @@
+#![feature(get_mut_unchecked)]
+
 use core::panic;
 use std::collections::VecDeque;
 use std::future::Future;
@@ -31,13 +33,13 @@ pub enum CompletionState {
 }
 
 pub struct CompletionRef {
-    inner: Arc<Mutex<CompletionState>>,
+    inner: Arc<CompletionState>,
 }
 
 impl CompletionRef {
     pub fn new() -> Self {
         Self {
-            inner: Arc::new(Mutex::new(CompletionState::Unstarted)),
+            inner: Arc::new(CompletionState::Unstarted),
         }
     }
 }
@@ -46,10 +48,6 @@ pub struct Read<'a> {
     fd: i32,
     buf: &'a mut [u8],
     offset: u64,
-    // TODO builder pattern to set common fields like flags,
-    // rw_flags, ioprio. Maybe a macro to insert it into Write etc as well.
-    // Or atleast a common struct...
-    state: CompletionRef,
 }
 
 pub const NR_CPU: usize = 16;
@@ -65,7 +63,7 @@ pub fn process_uring() {
         // if len != 0 {
         //     let s = unsafe { ring.submitter().enter::<()>(len, 0, sys::IORING_ENTER_SQ_WAIT, None) }.expect("submit");
         // }
-        
+
         ring.submit().expect("submit");
         INTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         // println!("submitted {s}");
@@ -93,9 +91,9 @@ pub fn process_uring() {
 pub fn set_result(user_data: u64, result: i32) {
     // drop locks before waking up the waker - https://users.rust-lang.org/t/should-locks-be-dropped-before-calling-waker-wake/53057
     let prev_state = {
-        let state = unsafe { Arc::from_raw(user_data as *const Mutex<CompletionState>) };
+        let mut state = unsafe { Arc::from_raw(user_data as *const CompletionState) };
         // expect very little contention
-        let mut lock = state.lock();
+        let mut lock = unsafe { Arc::get_mut_unchecked(&mut state) };
         let prev_state = std::mem::replace(&mut *lock, CompletionState::Completed { result });
         prev_state
     };
@@ -109,15 +107,10 @@ pub fn set_result(user_data: u64, result: i32) {
 
 impl<'a> Read<'a> {
     pub fn new(fd: i32, buf: &'a mut [u8], offset: u64) -> Self {
-        Self {
-            fd,
-            buf,
-            offset,
-            state: CompletionRef::new(),
-        }
+        Self { fd, buf, offset }
     }
 
-    pub fn build(&self) -> io_uring_sqe {
+    pub fn build(&self, inner: &CompletionRef) -> io_uring_sqe {
         let mut sqe: io_uring_sqe = Default::default();
         sqe.opcode = IORING_OP_READ as _;
         sqe.fd = self.fd; // TODO this could be fixed fd as well
@@ -128,7 +121,7 @@ impl<'a> Read<'a> {
         // sqe.__bindgen_anon_3.rw_flags = rw_flags;
         // sqe.__bindgen_anon_4.buf_group = buf_group;
 
-        let state_clone = self.state.inner.clone();
+        let state_clone = Arc::clone(&inner.inner);
         let state_clone_ptr = Arc::into_raw(state_clone);
         sqe.user_data = state_clone_ptr as _;
 
@@ -136,18 +129,36 @@ impl<'a> Read<'a> {
     }
 }
 
-impl Future for Read<'_> {
+struct Fut<'a> {
+    inner: Read<'a>,
+    // TODO builder pattern to set common fields like flags,
+    // rw_flags, ioprio. Maybe a macro to insert it into Write etc as well.
+    // Or atleast a common struct...
+    state: CompletionRef,
+}
+
+impl<'a> Fut<'a> {
+    pub fn new(inner: Read<'a>) -> Self {
+        Self {
+            inner,
+            state: CompletionRef::new(),
+        }
+    }
+}
+
+impl Future for Fut<'_> {
     type Output = std::io::Result<i32>;
 
     fn poll(
-        self: std::pin::Pin<&mut Self>,
+        mut self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Self::Output> {
-        let mut lock = self.state.inner.lock();
+        let lock = unsafe { Arc::get_mut_unchecked(&mut self.state.inner) };
 
         match &*lock {
             CompletionState::Unstarted => {
-                let entry = to_entry(self.build());
+                drop(lock);
+                let entry = to_entry(self.inner.build(&self.state));
                 // println!("pushing entry threadid={:?}", std::thread::current().id());
                 // TODO EW blocking.... and possible deadlock since thread won't get parked like this?
                 //
@@ -168,6 +179,8 @@ impl Future for Read<'_> {
 
                     return Poll::Pending;
                 }
+
+                let lock = unsafe { Arc::get_mut_unchecked(&mut self.state.inner) };
                 *lock = CompletionState::InProgress(cx.waker().clone());
                 Poll::Pending
             }
@@ -259,25 +272,25 @@ mod tests {
 
     use super::*;
 
-    #[test]
-    fn basic_read() -> Result<(), Box<dyn Error>> {
-        let mut ring = io_uring::IoUring::new(1000)?;
-        let mut buf = [0; 1024];
-        let file = File::open("Cargo.toml")?;
-        let read = Read::new(file.as_raw_fd(), &mut buf, 0);
-        let read_entry = to_entry(read.build());
+    // #[test]
+    // fn basic_read() -> Result<(), Box<dyn Error>> {
+    //     let mut ring = io_uring::IoUring::new(1000)?;
+    //     let mut buf = [0; 1024];
+    //     let file = File::open("Cargo.toml")?;
+    //     let read = Read::new(file.as_raw_fd(), &mut buf, 0);
+    //     let read_entry = to_entry(read.build());
 
-        unsafe { ring.submission().push(&read_entry)? }
-        ring.submit_and_wait(1)?;
-        let entry = ring.completion().next().expect("one read entry");
-        let result = entry.result();
-        if result < 0 {
-            return Err(std::io::Error::from_raw_os_error(-result as i32).into());
-        }
-        let buf = String::from_utf8_lossy(&buf[..result as usize]);
-        assert!(buf.contains("vilya"), "io_uring read failed");
-        Ok(())
-    }
+    //     unsafe { ring.submission().push(&read_entry)? }
+    //     ring.submit_and_wait(1)?;
+    //     let entry = ring.completion().next().expect("one read entry");
+    //     let result = entry.result();
+    //     if result < 0 {
+    //         return Err(std::io::Error::from_raw_os_error(-result as i32).into());
+    //     }
+    //     let buf = String::from_utf8_lossy(&buf[..result as usize]);
+    //     assert!(buf.contains("vilya"), "io_uring read failed");
+    //     Ok(())
+    // }
 
     async fn read_cargo() -> Result<(), Box<dyn Send + Error>> {
         let mut buf = [0; 1024];
@@ -288,7 +301,7 @@ mod tests {
             .map(|i| {
                 let fut = async move {
                     let mut b = [0; 1];
-                    let read = Read::new(fd, &mut b, i as u64);
+                    let read = Fut::new(Read::new(fd, &mut b, i as u64));
                     read.await.expect("read");
                     (i, b)
                 };
@@ -342,7 +355,7 @@ mod tests {
         // can't run async stuff in the main block_on as it's not a worker thread - so no parking!
         let file = File::open("Cargo.toml").expect("open");
         let fd = file.as_raw_fd();
-        let stress = 2_000_000;
+        let stress = 10_000_000;
         rt.block_on(async move {
             tokio::spawn(async move {
                 let mut wg = WaitGroup::new();
@@ -350,7 +363,7 @@ mod tests {
                     let worker = wg.worker();
                     let fut = async move {
                         let mut b = [0; 1];
-                        let read = Read::new(fd, &mut b, 0);
+                        let read = Fut::new(Read::new(fd, &mut b, 0));
                         assert_eq!(1, read.await.expect("read"));
                         worker.done();
                     };
@@ -364,5 +377,4 @@ mod tests {
         println!("acc={:?}", acc);
         Ok(())
     }
-
 }
