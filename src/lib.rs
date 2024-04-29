@@ -1,6 +1,8 @@
 mod sys;
 use std::collections::VecDeque;
 use std::future::Future;
+use std::os::fd::RawFd;
+use std::os::fd::AsRawFd;
 use std::sync::Arc;
 use std::task::{Poll, Waker};
 
@@ -58,17 +60,16 @@ pub fn process_uring() {
             // println!("CQE, result={:?}, data={:x?}", cq.result(), user_data);
             set_result(user_data, res);
         }
-        
+
         // TODO expect lots of contention
         let mut wakers = WAITING_WAKERS.upgradable_read();
         if !wakers.is_empty() {
-            wakers.with_upgraded(|wakers| {
-                let len = (NR_CPU*NR_CPU).min(wakers.len());
+            wakers.try_with_upgraded(|wakers| {
+                let len = (NR_CPU * NR_CPU).min(wakers.len());
                 //let len = 1;
                 wakers.drain(..len).for_each(|waker| waker.wake())
-            })
+            });
         }
-        
     });
     // println!("exiting park...")
 }
@@ -160,15 +161,39 @@ impl Future for Read<'_> {
                 Poll::Pending
             }
             CompletionState::InProgress(_) => Poll::Pending,
-            CompletionState::Completed { result } => Poll::Ready(Ok(*result)),
+            CompletionState::Completed { result } => {
+                if *result < 0 {
+                    Poll::Ready(Err(std::io::Error::from_raw_os_error(-*result as i32)))
+                } else {
+                    Poll::Ready(Ok(*result))
+                }
+            }
         }
     }
 }
 
 thread_local! {
-    pub static RING: RefCell<io_uring::IoUring> = RefCell::new(io_uring::IoUring::builder().setup_single_issuer().build(0x4000).expect("io_uring"));
+    pub static RING: RefCell<io_uring::IoUring> = {
+        let mut builder = io_uring::IoUring::builder();
+        builder.setup_single_issuer();
+        builder.setup_submit_all();
+
+        // builder.setup_iopoll();
+        // let mut shared_wq = true;
+        // let mut fd = unsafe { SHARED_RING_FD.lock() };
+        // if let Some(ref fd) = &*fd {
+        //     builder.setup_attach_wq(*fd);
+        //     shared_wq = false;
+        // }
+        let ring = builder.build(0x4000).expect("io_uring");
+        // if shared_wq {
+        //     *fd = Some(ring.as_raw_fd());
+        // }
+        RefCell::new(ring)
+    }
 }
 
+pub static mut SHARED_RING_FD: Mutex<Option<RawFd>> = Mutex::new(None);
 pub static WAITING_WAKERS: RwLock<VecDeque<Waker>> = RwLock::new(VecDeque::new());
 
 struct Never;
@@ -296,7 +321,7 @@ mod tests {
     #[test]
     fn stress_test() -> Result<(), Box<dyn Error>> {
         let rt = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(2)
+            .worker_threads(16)
             .on_thread_park(|| {
                 process_uring();
             })
