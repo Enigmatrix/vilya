@@ -1,9 +1,6 @@
 #![feature(get_mut_unchecked)]
 
-use core::panic;
-use std::collections::VecDeque;
 use std::future::Future;
-use std::os::fd::AsRawFd;
 use std::os::fd::RawFd;
 use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
@@ -11,12 +8,13 @@ use std::task::{Poll, Waker};
 
 use crossbeam_queue::SegQueue;
 use io_uring::squeue::Entry;
+use io_uring::sys::{io_uring_sqe, IORING_OP_READ};
 use parking_lot::{Mutex, RwLock};
 use std::cell::RefCell;
-use io_uring::sys::{io_uring_sqe, IORING_OP_READ};
 
 mod future;
 mod rt;
+mod util;
 
 /// # Safety
 /// This function is safe since Entry is internally a io_uring_sqe,

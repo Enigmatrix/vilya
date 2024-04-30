@@ -47,7 +47,7 @@ impl CompletionRef {
 
 pub trait UringOp {
     type Output;
-    
+
     unsafe fn build_entry(&self, entry: &mut Entry);
     fn to_output(&self, result: i32) -> Self::Output;
 }
@@ -61,7 +61,7 @@ impl<T: UringOp> Future for UringFuture<T> {
     type Output = Result<T::Output>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<T::Output>> {
-        // To be here, we need to have been woken up by the Waker, or it's the 
+        // To be here, we need to have been woken up by the Waker, or it's the
         // initial call to poll. Notably, we cannot be waken up and be in the
         // InProgress state.
 
@@ -81,7 +81,7 @@ impl<T: UringOp> Future for UringFuture<T> {
         match *state {
             CompletionState::Unsubmitted => {
                 todo!()
-            },
+            }
             CompletionState::InProgress { .. } => unreachable!(),
             CompletionState::Completed { result } => {
                 if result < 0 {
