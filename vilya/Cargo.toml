@@ -1,0 +1,21 @@
+[package]
+name = "vilya"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+overwrite = [ "bindgen" ]
+bindgen = [ "dep:bindgen" ]
+
+[dependencies]
+crossbeam-queue = "0.3.11"
+io-uring = "0.6.4"
+parking_lot = "0.12.2"
+
+[build-dependencies]
+bindgen = { version = "0.69", optional = true }
+
+[dev-dependencies]
+awaitgroup = "0.7.0"
+futures = "0.3.30"
+tokio = { version = "1.37.0", features = ["full", "test-util"] }
