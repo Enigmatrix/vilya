@@ -13,11 +13,10 @@ use crossbeam_queue::SegQueue;
 use io_uring::squeue::Entry;
 use parking_lot::{Mutex, RwLock};
 use std::cell::RefCell;
-use sys::{io_uring_sqe, IORING_OP_READ};
+use io_uring::sys::{io_uring_sqe, IORING_OP_READ};
 
 mod future;
 mod rt;
-mod sys;
 
 /// # Safety
 /// This function is safe since Entry is internally a io_uring_sqe,

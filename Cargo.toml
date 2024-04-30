@@ -9,7 +9,7 @@ bindgen = [ "dep:bindgen" ]
 
 [dependencies]
 crossbeam-queue = "0.3.11"
-io-uring = "0.6.4"
+io-uring = { git = "https://github.com/Enigmatrix/io-uring", rev = "0e74363" }
 parking_lot = "0.12.2"
 
 [build-dependencies]
