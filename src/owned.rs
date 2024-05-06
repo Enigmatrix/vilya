@@ -69,6 +69,20 @@ impl<T> KernelOwned<T> {
             None
         }
     }
+
+    pub fn to_user_data(self) -> u64 {
+        let ptr = self.ptr.as_ptr() as u64;
+        mem::forget(self);
+        ptr
+    }
+}
+
+impl KernelOwned<()> {
+    pub fn from_user_data(user_data: u64) -> Self {
+        Self {
+            ptr: unsafe { ptr::NonNull::new_unchecked(user_data as *mut _) },
+        }
+    }
 }
 
 // copied from Arc's Clone & Drop
@@ -125,19 +139,22 @@ mod tests {
     #[test]
     fn stress_test_clone() {
         let checker = KernelOwned::new(Checker::new());
-        
-        let threads = (0..100).map(|_| {
-            let tmp = checker.clone();
-            let join_handle = std::thread::spawn(move || {
-                let tmp = tmp;
-                for _ in 0..1_000_000 {
-                    let _ = tmp.clone();
-                }
-            });
-            join_handle
-        }).collect::<Vec<_>>();
-        drop(checker);
+
+        let threads = (0..100)
+            .map(|_| {
+                let clone = checker.clone();
+                let user_data = clone.to_user_data();
+                let join_handle = std::thread::spawn(move || {
+                    let tmp = KernelOwned::from_user_data(user_data);
+                    for _ in 0..1_000_000 {
+                        let _ = tmp.clone();
+                    }
+                });
+                join_handle
+            })
+            .collect::<Vec<_>>();
         threads.into_iter().for_each(|t| t.join().unwrap());
+        drop(checker);
         check_drop_count(1);
     }
 }
