@@ -8,13 +8,12 @@ use future::CompletionState;
 use io_uring::squeue::Entry;
 use io_uring::sys::{io_uring_sqe, IORING_OP_READ};
 use owned::KernelOwned;
-use parking_lot::{Mutex, RwLock};
+use parking_lot::Mutex;
 use std::cell::RefCell;
 
 mod future;
 mod owned;
 mod rt;
-mod util;
 
 static CHECKER_COUNT: AtomicUsize = AtomicUsize::new(0);
 static COMPLETED: AtomicUsize = AtomicUsize::new(0);
