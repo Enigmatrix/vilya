@@ -1,5 +1,3 @@
-#![feature(get_mut_unchecked)]
-
 use std::future::Future;
 use std::os::fd::RawFd;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -18,20 +16,21 @@ mod owned;
 mod rt;
 mod util;
 
-static COUNT: AtomicUsize = AtomicUsize::new(0);
+static CHECKER_COUNT: AtomicUsize = AtomicUsize::new(0);
+static COMPLETED: AtomicUsize = AtomicUsize::new(0);
 
 struct Checker(AtomicUsize);
 
 impl Checker {
     fn new() -> Self {
-        COUNT.fetch_add(1, Ordering::SeqCst);
+        CHECKER_COUNT.fetch_add(1, Ordering::SeqCst);
         Self(AtomicUsize::new(1))
     }
 }
 
 impl Drop for Checker {
     fn drop(&mut self) {
-        COUNT.fetch_sub(1, Ordering::SeqCst);
+        CHECKER_COUNT.fetch_sub(1, Ordering::SeqCst);
         if self.0.fetch_sub(1, Ordering::SeqCst) != 1 {
             panic!("double drop");
         }
@@ -84,6 +83,7 @@ pub fn process_uring() {
             let res = cq.result();
             let user_data = cq.user_data();
             // println!("CQE, result={:?}, data={:x?}", cq.result(), user_data);
+            COMPLETED.fetch_add(1, Ordering::SeqCst);
             set_result(user_data, res);
         }
 
@@ -110,7 +110,7 @@ pub fn set_result(user_data: u64, result: i32) {
         prev_state
     };
 
-    if let CompletionState::InProgress{waker} = prev_state {
+    if let CompletionState::InProgress { waker } = prev_state {
         waker.wake();
     } else {
         unreachable!()
@@ -169,7 +169,6 @@ impl Future for Fut<'_> {
         match &*lock {
             CompletionState::Unsubmitted => {
                 drop(lock);
-                let entry = to_entry(self.inner.build(&self.state));
                 // println!("pushing entry threadid={:?}", std::thread::current().id());
                 // TODO EW blocking.... and possible deadlock since thread won't get parked like this?
                 //
@@ -181,9 +180,8 @@ impl Future for Fut<'_> {
                 // global...
                 // maybe we can call process_uring after a certain threshold of waiting occurs? so need to store wait count
                 // in the Waiting state
-                if let Err(_) =
-                    RING.with_borrow_mut(|ring| unsafe { ring.submission().push(&entry) })
-                {
+
+                if RING.with_borrow_mut(|ring| ring.submission().is_full()) {
                     // can't push now, try again later
                     // process_uring();
                     WAITING_WAKERS.push(cx.waker().clone());
@@ -191,11 +189,18 @@ impl Future for Fut<'_> {
                     return Poll::Pending;
                 }
 
+                // never build twice!
+                let entry = to_entry(self.inner.build(&self.state));
+                RING.with_borrow_mut(|ring| unsafe { ring.submission().push(&entry) })
+                    .unwrap();
+
                 let mut lock = self.state.inner.state().try_lock().unwrap();
-                *lock = CompletionState::InProgress { waker: cx.waker().clone() };
+                *lock = CompletionState::InProgress {
+                    waker: cx.waker().clone(),
+                };
                 Poll::Pending
             }
-            CompletionState::InProgress{..} => unreachable!(),
+            CompletionState::InProgress { .. } => unreachable!(),
             CompletionState::Completed { result } => {
                 if *result < 0 {
                     Poll::Ready(Err(std::io::Error::from_raw_os_error(-*result as i32)))
@@ -354,7 +359,7 @@ mod tests {
     }
 
     #[test]
-    fn stress_test() -> Result<(), Box<dyn Error>> {
+    fn stress_test_uring() -> Result<(), Box<dyn Error>> {
         let rt = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(16)
             .on_thread_park(|| {
@@ -386,7 +391,8 @@ mod tests {
         })?;
         let acc = INTER.load(std::sync::atomic::Ordering::Relaxed);
         println!("acc={:?}", acc);
-        assert_eq!(COUNT.load(Ordering::SeqCst), 0);
+        assert_eq!(stress - COMPLETED.load(Ordering::SeqCst), 0);
+        assert_eq!(CHECKER_COUNT.load(Ordering::SeqCst), 0);
         Ok(())
     }
 }
