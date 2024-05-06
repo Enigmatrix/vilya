@@ -2,13 +2,14 @@
 
 use std::future::Future;
 use std::os::fd::RawFd;
-use std::sync::atomic::AtomicUsize;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Poll, Waker};
 
 use crossbeam_queue::SegQueue;
+use future::CompletionState;
 use io_uring::squeue::Entry;
 use io_uring::sys::{io_uring_sqe, IORING_OP_READ};
+use owned::KernelOwned;
 use parking_lot::{Mutex, RwLock};
 use std::cell::RefCell;
 
@@ -17,6 +18,26 @@ mod owned;
 mod rt;
 mod util;
 
+static COUNT: AtomicUsize = AtomicUsize::new(0);
+
+struct Checker(AtomicUsize);
+
+impl Checker {
+    fn new() -> Self {
+        COUNT.fetch_add(1, Ordering::SeqCst);
+        Self(AtomicUsize::new(1))
+    }
+}
+
+impl Drop for Checker {
+    fn drop(&mut self) {
+        COUNT.fetch_sub(1, Ordering::SeqCst);
+        if self.0.fetch_sub(1, Ordering::SeqCst) != 1 {
+            panic!("double drop");
+        }
+    }
+}
+
 /// # Safety
 /// This function is safe since Entry is internally a io_uring_sqe,
 /// one that's private in the io_uring crate.
@@ -24,20 +45,14 @@ fn to_entry(sqe: io_uring_sqe) -> Entry {
     unsafe { std::mem::transmute(sqe) }
 }
 
-pub enum CompletionState {
-    Unstarted,
-    InProgress(Waker),
-    Completed { result: i32 },
-}
-
 pub struct CompletionRef {
-    inner: Arc<CompletionState>,
+    inner: KernelOwned<Checker>,
 }
 
 impl CompletionRef {
     pub fn new() -> Self {
         Self {
-            inner: Arc::new(CompletionState::Unstarted),
+            inner: KernelOwned::new(Checker::new()),
         }
     }
 }
@@ -89,14 +104,13 @@ pub fn process_uring() {
 pub fn set_result(user_data: u64, result: i32) {
     // drop locks before waking up the waker - https://users.rust-lang.org/t/should-locks-be-dropped-before-calling-waker-wake/53057
     let prev_state = {
-        let mut state = unsafe { Arc::from_raw(user_data as *const CompletionState) };
-        // expect very little contention
-        let mut lock = unsafe { Arc::get_mut_unchecked(&mut state) };
+        let what = KernelOwned::from_user_data(user_data);
+        let mut lock = what.state().try_lock().unwrap();
         let prev_state = std::mem::replace(&mut *lock, CompletionState::Completed { result });
         prev_state
     };
 
-    if let CompletionState::InProgress(waker) = prev_state {
+    if let CompletionState::InProgress{waker} = prev_state {
         waker.wake();
     } else {
         unreachable!()
@@ -119,9 +133,8 @@ impl<'a> Read<'a> {
         // sqe.__bindgen_anon_3.rw_flags = rw_flags;
         // sqe.__bindgen_anon_4.buf_group = buf_group;
 
-        let state_clone = Arc::clone(&inner.inner);
-        let state_clone_ptr = Arc::into_raw(state_clone);
-        sqe.user_data = state_clone_ptr as _;
+        let state_clone = inner.inner.clone();
+        sqe.user_data = state_clone.to_user_data();
 
         sqe
     }
@@ -151,10 +164,10 @@ impl Future for Fut<'_> {
         mut self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Self::Output> {
-        let lock = unsafe { Arc::get_mut_unchecked(&mut self.state.inner) };
+        let lock = self.state.inner.state().try_lock().unwrap();
 
         match &*lock {
-            CompletionState::Unstarted => {
+            CompletionState::Unsubmitted => {
                 drop(lock);
                 let entry = to_entry(self.inner.build(&self.state));
                 // println!("pushing entry threadid={:?}", std::thread::current().id());
@@ -178,11 +191,11 @@ impl Future for Fut<'_> {
                     return Poll::Pending;
                 }
 
-                let lock = unsafe { Arc::get_mut_unchecked(&mut self.state.inner) };
-                *lock = CompletionState::InProgress(cx.waker().clone());
+                let mut lock = self.state.inner.state().try_lock().unwrap();
+                *lock = CompletionState::InProgress { waker: cx.waker().clone() };
                 Poll::Pending
             }
-            CompletionState::InProgress(_) => unreachable!(),
+            CompletionState::InProgress{..} => unreachable!(),
             CompletionState::Completed { result } => {
                 if *result < 0 {
                     Poll::Ready(Err(std::io::Error::from_raw_os_error(-*result as i32)))
@@ -373,6 +386,7 @@ mod tests {
         })?;
         let acc = INTER.load(std::sync::atomic::Ordering::Relaxed);
         println!("acc={:?}", acc);
+        assert_eq!(COUNT.load(Ordering::SeqCst), 0);
         Ok(())
     }
 }
