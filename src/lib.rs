@@ -47,13 +47,17 @@ fn to_entry(sqe: io_uring_sqe) -> Entry {
 }
 
 pub struct CompletionRef {
-    inner: KernelOwned<Mutex<CompletionState>, Checker>,
+    inner: KernelOwned<Mutex<CompletionState>, (Vec<u8>, Checker)>,
 }
 
 impl CompletionRef {
     pub fn new() -> Self {
+        let v = vec![0; 1];
         Self {
-            inner: KernelOwned::new(Mutex::new(CompletionState::Unsubmitted), Checker::new()),
+            inner: KernelOwned::new(
+                Mutex::new(CompletionState::Unsubmitted),
+                (v, Checker::new()),
+            ),
         }
     }
 }
@@ -283,7 +287,7 @@ impl Future for Never {
 
 #[cfg(test)]
 mod tests {
-    use std::{error::Error, fs::File, io::Seek, os::fd::AsRawFd};
+    use std::{error::Error, fs::File, io::Seek, os::fd::AsRawFd, sync::Arc};
 
     use awaitgroup::WaitGroup;
     use futures::{stream::FuturesUnordered, StreamExt};
@@ -376,18 +380,28 @@ mod tests {
 
         // println!("starting... id={:?}", std::thread::current().id());
         // can't run async stuff in the main block_on as it's not a worker thread - so no parking!
-        let file = File::open("Cargo.toml").expect("open");
+        let mut file = File::open("Cargo.toml").expect("open");
         let fd = file.as_raw_fd();
-        let stress = 10_000_000;
+        let mut read_buf = vec![0; 100];
+        std::io::Read::read_exact(&mut file, &mut read_buf).expect("read");
+        let read_buf = Arc::new(read_buf);
+
+        let stress = 1_000_000;
         rt.block_on(async move {
+            let read_buf = read_buf.clone();
             tokio::spawn(async move {
+                let read_buf = read_buf.clone();
                 let mut wg = WaitGroup::new();
                 (0..stress).for_each(|_| {
                     let worker = wg.worker();
+                    let read_buf = read_buf.clone();
                     let fut = async move {
-                        let mut b = [0; 1];
+                        let read_buf = read_buf.clone();
+                        let mut b = [0; 100];
                         let read = Fut::new(Read::new(fd, &mut b, 0));
-                        assert_eq!(1, read.await.expect("read"));
+                        let w = read.await.expect("read");
+
+                        assert_eq!(&b[..w as usize], read_buf.as_ref());
                         worker.done();
                     };
                     tokio::spawn(fut);

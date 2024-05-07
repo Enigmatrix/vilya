@@ -63,6 +63,14 @@ impl<H, T> KernelOwned<H, T> {
         (*on_heap).data.take()
     }
 
+    /// # Safety
+    /// This should only be called before a call to [`Self::data`].
+    /// Multiple calls are allowed.
+    pub unsafe fn data_ref(&self) -> Option<&T> {
+        let on_heap = self.ptr.as_ptr();
+        (*on_heap).data.as_ref()
+    }
+
     pub fn into_user_data(self) -> u64 {
         let ptr = self.ptr.as_ptr() as u64;
         mem::forget(self); // will be dropped kernel-side instead
