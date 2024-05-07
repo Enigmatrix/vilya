@@ -1,6 +1,6 @@
 use std::{
     sync::{
-        atomic::{AtomicIsize, AtomicUsize, Ordering},
+        atomic::{AtomicIsize, Ordering},
         Arc,
     },
     task::Waker,
@@ -57,19 +57,15 @@ impl SubmitWaitQueueInner {
     }
 
     pub fn wake(&self) {
-        loop {
-            if let Some(waker) = self.queue.pop() {
-                waker.wake();
+        while let Some(waker) = self.queue.pop() {
+            waker.wake();
 
-                if self.to_wake.fetch_sub(1, Ordering::Relaxed) == 0 {
-                    let max_wake = self
-                        .free_entries
-                        .load(Ordering::Relaxed)
-                        .min(self.nr_rings * self.nr_rings);
-                    self.to_wake.store(max_wake, Ordering::Relaxed);
-                    break;
-                }
-            } else {
+            if self.to_wake.fetch_sub(1, Ordering::Relaxed) == 0 {
+                let max_wake = self
+                    .free_entries
+                    .load(Ordering::Relaxed)
+                    .min(self.nr_rings * self.nr_rings);
+                self.to_wake.store(max_wake, Ordering::Relaxed);
                 break;
             }
         }

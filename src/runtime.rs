@@ -1,9 +1,4 @@
-use std::{
-    cell::{LazyCell, RefCell},
-    mem,
-    sync::LazyLock,
-    task::Waker,
-};
+use std::{cell::RefCell, mem, sync::LazyLock, task::Waker};
 
 use parking_lot::Mutex;
 
@@ -56,7 +51,7 @@ impl Initializer {
 }
 
 static INITIALIZER: Mutex<Initializer> = Mutex::new(Initializer::new());
-static WAKER: LazyLock<SubmitWaitQueue> = LazyLock::new(|| SubmitWaitQueue::new());
+static WAKER: LazyLock<SubmitWaitQueue> = LazyLock::new(SubmitWaitQueue::new);
 
 impl Runtime {
     pub fn new() -> Self {
@@ -104,7 +99,7 @@ impl Runtime {
             Runtime::mark_complete(user_data, result);
             reaped += 1;
         }
-        return reaped;
+        reaped
     }
 
     fn mark_complete(user_data: u64, result: i32) {
