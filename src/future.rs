@@ -8,7 +8,7 @@ use io_uring::squeue::Entry;
 use parking_lot::{Mutex, MutexGuard};
 use std::io::{Error, Result};
 
-use crate::owned::KernelOwned;
+use crate::{owned::KernelOwned, runtime::Runtime};
 
 pub enum CompletionState {
     Unsubmitted,
@@ -40,8 +40,7 @@ impl<T: Send + 'static> CompletionRef<T> {
     }
 
     pub fn data(&self) -> T {
-        let data = unsafe { self.inner.data() }.expect("data has been moved out");
-        data
+        unsafe { self.inner.data() }.expect("data has been moved out")
     }
 }
 
@@ -57,19 +56,19 @@ pub trait UringOp {
     type Storage;
     type Output;
 
-    unsafe fn build_entry(&self, entry: &mut Entry);
+    unsafe fn build_entry(&self, entry: &mut Entry, user_data: u64);
     fn to_output(&self, storage: Self::Storage, result: i32) -> Self::Output;
 }
 
 pub struct UringFuture<T: UringOp> {
     op: T,
-    state: CompletionRef<T::Storage>,
+    completion_ref: CompletionRef<T::Storage>,
 }
 
 impl<T: UringOp<Storage: Send + 'static>> Future for UringFuture<T> {
     type Output = Result<T::Output>;
 
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<T::Output>> {
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<T::Output>> {
         // To be here, we need to have been woken up by the Waker, or it's the
         // initial call to poll. Notably, we cannot be waken up and be in the
         // InProgress state.
@@ -85,18 +84,34 @@ impl<T: UringOp<Storage: Send + 'static>> Future for UringFuture<T> {
          * Therefore, we can just use lock without worry, as there will never be
          * any contention.
          */
-        let mut state = self.state.lock();
+        let mut state = self.completion_ref.lock();
 
         match *state {
             CompletionState::Unsubmitted => {
-                todo!()
+                if Runtime::with_current(|rt| rt.is_full()) {
+                    // wait to be woken
+                    // TODO
+                    return Poll::Pending;
+                }
+
+                let user_data = unsafe { self.completion_ref.place_clone_in_kernel() };
+                let mut entry = unsafe { std::mem::zeroed::<Entry>() };
+                unsafe { self.op.build_entry(&mut entry, user_data) };
+
+                // rt.is_full() is true, so there is always space
+                Runtime::with_current(|rt| rt.submit(&entry)).unwrap();
+
+                *state = CompletionState::InProgress {
+                    waker: cx.waker().clone(),
+                };
+                Poll::Pending
             }
             CompletionState::InProgress { .. } => unreachable!(),
             CompletionState::Completed { result } => {
                 if result < 0 {
                     return Poll::Ready(Err(Error::from_raw_os_error(-result)));
                 }
-                let storage = self.state.data();
+                let storage = self.completion_ref.data();
                 Poll::Ready(Ok(self.op.to_output(storage, result)))
             }
         }

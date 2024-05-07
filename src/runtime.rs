@@ -2,7 +2,10 @@ use std::cell::RefCell;
 
 use parking_lot::Mutex;
 
-use io_uring::{Builder, IoUring};
+use io_uring::{
+    squeue::{Entry, PushError},
+    Builder, IoUring,
+};
 
 pub struct Runtime {
     uring: IoUring,
@@ -30,7 +33,7 @@ impl Initializer {
         if let Some(ref init) = self.init {
             return init(builder);
         }
-        return def_init(builder);
+        def_init(builder)
     }
 
     fn set_init(&mut self, init: impl Send + Fn(Builder) -> IoUring + 'static) {
@@ -51,6 +54,18 @@ impl Runtime {
         };
 
         Self { uring }
+    }
+
+    pub fn is_full(&mut self) -> bool {
+        self.uring.submission().is_full()
+    }
+
+    pub fn submit(&mut self, entry: &Entry) -> Result<(), PushError> {
+        unsafe { self.uring.submission().push(entry) }
+    }
+
+    pub fn with_current<T>(call: impl Fn(&mut Runtime) -> T) -> T {
+        CURRENT_THREAD_RUNTIME.with_borrow_mut(call)
     }
 
     fn init(builder: Builder) -> IoUring {

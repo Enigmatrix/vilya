@@ -287,6 +287,8 @@ mod tests {
 
     use super::*;
 
+    static SERIALIZE: Mutex<()> = Mutex::new(());
+
     // #[test]
     // fn basic_read() -> Result<(), Box<dyn Error>> {
     //     let mut ring = io_uring::IoUring::new(1000)?;
@@ -345,6 +347,7 @@ mod tests {
 
     #[test]
     fn lmao_test() -> Result<(), Box<dyn Error>> {
+        let _serialize = SERIALIZE.lock();
         let rt = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(16)
             .on_thread_park(|| process_uring())
@@ -359,6 +362,8 @@ mod tests {
 
     #[test]
     fn stress_test_uring() -> Result<(), Box<dyn Error>> {
+        let _serialize = SERIALIZE.lock();
+        COMPLETED.store(0, Ordering::SeqCst);
         let rt = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(16)
             .on_thread_park(|| {

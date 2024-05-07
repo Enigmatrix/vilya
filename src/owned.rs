@@ -60,11 +60,10 @@ impl<H, T> KernelOwned<H, T> {
     /// be called when you are the sole owner of the KernelOwned instance.
     pub unsafe fn data(&self) -> Option<T> {
         let on_heap = self.ptr.as_ptr();
-        let data = mem::replace(&mut (*on_heap).data, None);
-        data
+        (*on_heap).data.take()
     }
 
-    pub fn to_user_data(self) -> u64 {
+    pub fn into_user_data(self) -> u64 {
         let ptr = self.ptr.as_ptr() as u64;
         mem::forget(self); // will be dropped kernel-side instead
         ptr
@@ -72,7 +71,7 @@ impl<H, T> KernelOwned<H, T> {
 
     pub fn place_clone_in_kernel(&self) -> u64 {
         let clone = self.clone();
-        clone.to_user_data()
+        clone.into_user_data()
     }
 }
 
@@ -143,7 +142,7 @@ mod tests {
         let threads = (0..100)
             .map(|_| {
                 let clone = checker.clone();
-                let user_data = clone.to_user_data();
+                let user_data = clone.into_user_data();
                 let join_handle = std::thread::spawn(move || {
                     let tmp = KernelOwned::<CompletionState, ()>::from_user_data(user_data);
                     for _ in 0..1_000_000 {
