@@ -13,7 +13,7 @@ use std::cell::RefCell;
 
 mod future;
 mod owned;
-mod rt;
+mod runtime;
 
 static CHECKER_COUNT: AtomicUsize = AtomicUsize::new(0);
 static COMPLETED: AtomicUsize = AtomicUsize::new(0);
