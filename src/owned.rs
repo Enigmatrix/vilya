@@ -54,17 +54,14 @@ impl<H, T> KernelOwned<H, T> {
         &self.header().inner
     }
 
-    pub fn data(mut self) -> Option<T> {
-        let on_heap = unsafe { self.ptr.as_mut() };
-        if on_heap.header.ref_count.load(Ordering::Relaxed) == 1 {
-            atomic::fence(Ordering::Acquire);
-            let data = mem::replace(&mut on_heap.data, None);
-            (on_heap.header.dealloc)(unsafe { self.ptr.as_mut() as *mut _ as *mut _ });
-            mem::forget(self); // don't call the normal drop
-            Some(data.unwrap())
-        } else {
-            None
-        }
+    /// # Safety
+    /// If Some is returned, the KernelOwned instance is no longer valid.
+    /// Specifically, a second call to `data` will return None. This should only
+    /// be called when you are the sole owner of the KernelOwned instance.
+    pub unsafe fn data(&self) -> Option<T> {
+        let on_heap = self.ptr.as_ptr();
+        let data = mem::replace(&mut (*on_heap).data, None);
+        data
     }
 
     pub fn to_user_data(self) -> u64 {

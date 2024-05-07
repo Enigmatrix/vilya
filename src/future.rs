@@ -1,7 +1,6 @@
 use std::{
     future::Future,
     pin::Pin,
-    sync::Arc,
     task::{Context, Poll, Waker},
 };
 
@@ -9,58 +8,68 @@ use io_uring::squeue::Entry;
 use parking_lot::{Mutex, MutexGuard};
 use std::io::{Error, Result};
 
+use crate::owned::KernelOwned;
+
 pub enum CompletionState {
     Unsubmitted,
     InProgress { waker: Waker },
     Completed { result: i32 },
 }
 
-pub struct CompletionRef {
-    inner: Arc<Mutex<CompletionState>>,
+pub struct CompletionRef<T> {
+    inner: KernelOwned<Mutex<CompletionState>, T>,
 }
 
-impl CompletionRef {
-    pub fn new() -> Self {
+impl<T: Send + 'static> CompletionRef<T> {
+    pub fn new(data: T) -> Self {
         Self {
-            inner: Arc::new(Mutex::new(CompletionState::Unsubmitted)),
+            inner: KernelOwned::new(Mutex::new(CompletionState::Unsubmitted), data),
         }
     }
 
-    pub unsafe fn clone_as_user_data(&self) -> u64 {
-        Arc::into_raw(Arc::clone(&self.inner)) as u64
-    }
-
-    pub unsafe fn from_user_data(user_data: u64) -> Self {
-        Self {
-            inner: Arc::from_raw(user_data as *const Mutex<CompletionState>),
-        }
+    pub unsafe fn place_clone_in_kernel(&self) -> u64 {
+        self.inner.place_clone_in_kernel()
     }
 
     pub fn try_lock(&self) -> Option<MutexGuard<'_, CompletionState>> {
-        self.inner.try_lock()
+        self.inner.header_inner().try_lock()
     }
 
     pub fn lock(&self) -> MutexGuard<'_, CompletionState> {
-        self.inner.lock()
+        self.inner.header_inner().lock()
+    }
+
+    pub fn data(&self) -> T {
+        let data = unsafe { self.inner.data() }.expect("data has been moved out");
+        data
+    }
+}
+
+impl CompletionRef<()> {
+    pub fn from_user_data(user_data: u64) -> Self {
+        Self {
+            inner: KernelOwned::from_user_data(user_data),
+        }
     }
 }
 
 pub trait UringOp {
+    type Storage;
     type Output;
 
     unsafe fn build_entry(&self, entry: &mut Entry);
-    fn to_output(&self, result: i32) -> Self::Output;
+    fn to_output(&self, storage: Self::Storage, result: i32) -> Self::Output;
 }
 
 pub struct UringFuture<T: UringOp> {
     op: T,
-    state: CompletionRef,
+    state: CompletionRef<T::Storage>,
 }
 
-impl<T: UringOp> Future for UringFuture<T> {
+impl<T: UringOp<Storage: Send + 'static>> Future for UringFuture<T> {
     type Output = Result<T::Output>;
 
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<T::Output>> {
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<T::Output>> {
         // To be here, we need to have been woken up by the Waker, or it's the
         // initial call to poll. Notably, we cannot be waken up and be in the
         // InProgress state.
@@ -87,7 +96,8 @@ impl<T: UringOp> Future for UringFuture<T> {
                 if result < 0 {
                     return Poll::Ready(Err(Error::from_raw_os_error(-result)));
                 }
-                Poll::Ready(Ok(self.op.to_output(result)))
+                let storage = self.state.data();
+                Poll::Ready(Ok(self.op.to_output(storage, result)))
             }
         }
     }
