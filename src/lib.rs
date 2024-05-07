@@ -1,3 +1,5 @@
+#![feature(lazy_cell)]
+
 use std::future::Future;
 use std::os::fd::RawFd;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -14,6 +16,7 @@ use std::cell::RefCell;
 mod future;
 mod owned;
 mod runtime;
+mod waker_queue;
 
 static CHECKER_COUNT: AtomicUsize = AtomicUsize::new(0);
 static COMPLETED: AtomicUsize = AtomicUsize::new(0);

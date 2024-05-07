@@ -90,9 +90,8 @@ impl<T: UringOp<Storage: Send + 'static>> Future for UringFuture<T> {
             CompletionState::Unsubmitted => {
                 if Runtime::with_current(|rt| rt.is_full()) {
                     // wait to be woken
-                    // TODO use a global queue of wakers here
-                    // return Poll::Pending;
-                    todo!("waker queue");
+                    Runtime::with_current(|rt| rt.push_waker(cx.waker().clone()));
+                    return Poll::Pending;
                 }
 
                 let user_data = unsafe { self.completion_ref.place_clone_in_kernel() };

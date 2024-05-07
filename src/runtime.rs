@@ -1,4 +1,9 @@
-use std::{cell::RefCell, mem};
+use std::{
+    cell::{LazyCell, RefCell},
+    mem,
+    sync::LazyLock,
+    task::Waker,
+};
 
 use parking_lot::Mutex;
 
@@ -7,10 +12,14 @@ use io_uring::{
     Builder, IoUring,
 };
 
-use crate::future::{CompletionRef, CompletionState};
+use crate::{
+    future::{CompletionRef, CompletionState},
+    waker_queue::SubmitWaitQueue,
+};
 
 pub struct Runtime {
     uring: IoUring,
+    waker: SubmitWaitQueue,
 }
 
 thread_local! {
@@ -47,15 +56,20 @@ impl Initializer {
 }
 
 static INITIALIZER: Mutex<Initializer> = Mutex::new(Initializer::new());
+static WAKER: LazyLock<SubmitWaitQueue> = LazyLock::new(|| SubmitWaitQueue::new());
 
 impl Runtime {
     pub fn new() -> Self {
-        let uring = {
+        let mut uring = {
             let builder = IoUring::builder();
             Runtime::init(builder)
         };
 
-        Self { uring }
+        let waker = WAKER.clone();
+
+        waker.add_free_entries(uring.submission().capacity() as isize);
+
+        Self { uring, waker }
     }
 
     pub fn is_full(&mut self) -> bool {
@@ -63,15 +77,34 @@ impl Runtime {
     }
 
     pub fn submit(&mut self, entry: &Entry) -> Result<(), PushError> {
+        self.waker.add_free_entries(-1);
         unsafe { self.uring.submission().push(entry) }
     }
 
-    fn reap_completions(&mut self) {
+    pub fn run_idle(&mut self) {
+        let submitted = self.uring.submit().expect("uring submit");
+        self.waker.add_free_entries(submitted as isize); // on SQPOLL, this value will be 0...
+        self.reap_completions();
+        self.wake();
+    }
+
+    pub fn push_waker(&self, waker: Waker) {
+        self.waker.push(waker);
+    }
+
+    fn wake(&self) {
+        self.waker.wake();
+    }
+
+    fn reap_completions(&mut self) -> usize {
+        let mut reaped = 0;
         for cqe in self.uring.completion() {
-            let res = cqe.result();
+            let result = cqe.result();
             let user_data = cqe.user_data();
-            Runtime::mark_complete(user_data, res);
+            Runtime::mark_complete(user_data, result);
+            reaped += 1;
         }
+        return reaped;
     }
 
     fn mark_complete(user_data: u64, result: i32) {
