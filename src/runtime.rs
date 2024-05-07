@@ -67,3 +67,24 @@ impl Runtime {
         lock.set_init(init);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::{panic::catch_unwind, thread};
+
+    use super::*;
+
+    #[test]
+    fn set_init_called_after_access_panics() {
+        let res = thread::spawn(|| {
+            Runtime::set_init(|builder| builder.build(0x100).unwrap()); // this is ok
+            let _ = CURRENT_THREAD_RUNTIME.with(|_| 1);
+            catch_unwind(|| {
+                Runtime::set_init(|builder| builder.build(0x100).unwrap());
+            })
+        })
+        .join()
+        .unwrap();
+        assert!(res.is_err())
+    }
+}
