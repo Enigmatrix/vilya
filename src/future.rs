@@ -90,20 +90,21 @@ impl<T: UringOp<Storage: Send + 'static>> Future for UringFuture<T> {
             CompletionState::Unsubmitted => {
                 if Runtime::with_current(|rt| rt.is_full()) {
                     // wait to be woken
-                    // TODO
-                    return Poll::Pending;
+                    // TODO use a global queue of wakers here
+                    // return Poll::Pending;
+                    todo!("waker queue");
                 }
 
                 let user_data = unsafe { self.completion_ref.place_clone_in_kernel() };
                 let mut entry = unsafe { std::mem::zeroed::<Entry>() };
                 unsafe { self.op.build_entry(&mut entry, user_data) };
 
-                // rt.is_full() is true, so there is always space
-                Runtime::with_current(|rt| rt.submit(&entry)).unwrap();
-
                 *state = CompletionState::InProgress {
                     waker: cx.waker().clone(),
                 };
+
+                // rt.is_full() is true, so there is always space
+                Runtime::with_current(|rt| rt.submit(&entry)).unwrap();
                 Poll::Pending
             }
             CompletionState::InProgress { .. } => unreachable!(),

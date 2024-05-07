@@ -1,4 +1,4 @@
-use std::cell::RefCell;
+use std::{cell::RefCell, mem};
 
 use parking_lot::Mutex;
 
@@ -6,6 +6,8 @@ use io_uring::{
     squeue::{Entry, PushError},
     Builder, IoUring,
 };
+
+use crate::future::{CompletionRef, CompletionState};
 
 pub struct Runtime {
     uring: IoUring,
@@ -62,6 +64,32 @@ impl Runtime {
 
     pub fn submit(&mut self, entry: &Entry) -> Result<(), PushError> {
         unsafe { self.uring.submission().push(entry) }
+    }
+
+    fn reap_completions(&mut self) {
+        for cqe in self.uring.completion() {
+            let res = cqe.result();
+            let user_data = cqe.user_data();
+            Runtime::mark_complete(user_data, res);
+        }
+    }
+
+    fn mark_complete(user_data: u64, result: i32) {
+        let prev_state = {
+            let completion_ref = CompletionRef::<()>::from_user_data(user_data);
+            let mut lock = completion_ref.lock();
+
+            // By wake(), the completion_ref must be dropped so that the UringFuture
+            // can be the sole owner if it's not already dropped. Similarly, lock must be
+            // dropped so that it's not held when wake() is called.
+            mem::replace(&mut *lock, CompletionState::Completed { result })
+        };
+
+        // The previous state MUST be InProgress to be even in the io-uring.
+        match prev_state {
+            CompletionState::InProgress { waker } => waker.wake(),
+            _ => unreachable!(),
+        };
     }
 
     pub fn with_current<T>(call: impl Fn(&mut Runtime) -> T) -> T {
