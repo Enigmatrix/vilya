@@ -1,46 +1,43 @@
 use std::sync::atomic::{self, AtomicUsize, Ordering};
-use std::sync::Mutex;
 use std::{mem, ptr};
 
-use crate::future::CompletionState;
-
 #[repr(C)]
-struct KernelOwnedOnHeapHeader {
+struct KernelOwnedOnHeapHeader<H> {
     ref_count: AtomicUsize,
     dealloc: fn(*mut Self),
-    state: Mutex<CompletionState>,
+    inner: H,
 }
 
 #[repr(C)]
-struct KernelOwnedOnHeap<T> {
-    header: KernelOwnedOnHeapHeader,
+struct KernelOwnedOnHeap<H, T> {
+    header: KernelOwnedOnHeapHeader<H>,
     data: Option<T>,
 }
 
-impl<T: Send + 'static> KernelOwnedOnHeap<T> {
-    pub fn new(data: T) -> Self {
+impl<H, T: Send + 'static> KernelOwnedOnHeap<H, T> {
+    pub fn new(header: H, data: T) -> Self {
         Self {
             header: KernelOwnedOnHeapHeader {
                 ref_count: AtomicUsize::new(1),
                 dealloc: |this| {
                     drop(unsafe { Box::<Self>::from_raw(this as *mut _) });
                 },
-                state: Mutex::new(CompletionState::Unsubmitted),
+                inner: header,
             },
             data: Some(data),
         }
     }
 }
 
-pub struct KernelOwned<T> {
-    ptr: ptr::NonNull<KernelOwnedOnHeap<T>>,
+pub struct KernelOwned<H, T> {
+    ptr: ptr::NonNull<KernelOwnedOnHeap<H, T>>,
 }
 
-unsafe impl<T> Send for KernelOwned<T> {}
+unsafe impl<H, T> Send for KernelOwned<H, T> {}
 
-impl<T: Send + 'static> KernelOwned<T> {
-    pub fn new(data: T) -> Self {
-        let ptr = Box::into_raw(Box::new(KernelOwnedOnHeap::new(data)));
+impl<H, T: Send + 'static> KernelOwned<H, T> {
+    pub fn new(header: H, data: T) -> Self {
+        let ptr = Box::into_raw(Box::new(KernelOwnedOnHeap::new(header, data)));
 
         Self {
             ptr: unsafe { ptr::NonNull::new_unchecked(ptr) },
@@ -48,13 +45,13 @@ impl<T: Send + 'static> KernelOwned<T> {
     }
 }
 
-impl<T> KernelOwned<T> {
-    fn header(&self) -> &KernelOwnedOnHeapHeader {
+impl<H, T> KernelOwned<H, T> {
+    fn header(&self) -> &KernelOwnedOnHeapHeader<H> {
         unsafe { &self.ptr.as_ref().header }
     }
 
-    pub fn state(&self) -> &Mutex<CompletionState> {
-        &self.header().state
+    pub fn header_inner(&self) -> &H {
+        &self.header().inner
     }
 
     pub fn data(mut self) -> Option<T> {
@@ -76,13 +73,13 @@ impl<T> KernelOwned<T> {
         ptr
     }
 
-    pub fn place_in_kernel(&self) -> u64 {
+    pub fn place_clone_in_kernel(&self) -> u64 {
         let clone = self.clone();
         clone.to_user_data()
     }
 }
 
-impl KernelOwned<()> {
+impl<H> KernelOwned<H, ()> {
     pub fn from_user_data(user_data: u64) -> Self {
         Self {
             ptr: unsafe { ptr::NonNull::new_unchecked(user_data as *mut _) },
@@ -92,7 +89,7 @@ impl KernelOwned<()> {
 
 // copied from Arc's Clone & Drop
 
-impl<T> Clone for KernelOwned<T> {
+impl<H, T> Clone for KernelOwned<H, T> {
     fn clone(&self) -> Self {
         self.header().ref_count.fetch_add(1, Ordering::Relaxed);
 
@@ -100,7 +97,7 @@ impl<T> Clone for KernelOwned<T> {
     }
 }
 
-impl<T> Drop for KernelOwned<T> {
+impl<H, T> Drop for KernelOwned<H, T> {
     fn drop(&mut self) {
         let header = self.header();
         if header.ref_count.fetch_sub(1, Ordering::Release) == 1 {
@@ -113,10 +110,11 @@ impl<T> Drop for KernelOwned<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::future::CompletionState;
 
     #[test]
     fn kernel_owned_size_is_u64() {
-        let owned = KernelOwned::new(Vec::<u8>::with_capacity(1024));
+        let owned = KernelOwned::new(CompletionState::Unsubmitted, Vec::<u8>::with_capacity(1024));
         assert_eq!(std::mem::size_of::<u64>(), std::mem::size_of_val(&owned));
     }
 
@@ -143,14 +141,14 @@ mod tests {
 
     #[test]
     fn stress_test_clone() {
-        let checker = KernelOwned::new(Checker::new());
+        let checker = KernelOwned::new(CompletionState::Unsubmitted, Checker::new());
 
         let threads = (0..100)
             .map(|_| {
                 let clone = checker.clone();
                 let user_data = clone.to_user_data();
                 let join_handle = std::thread::spawn(move || {
-                    let tmp = KernelOwned::from_user_data(user_data);
+                    let tmp = KernelOwned::<CompletionState, ()>::from_user_data(user_data);
                     for _ in 0..1_000_000 {
                         let _ = tmp.clone();
                     }

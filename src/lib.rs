@@ -44,13 +44,13 @@ fn to_entry(sqe: io_uring_sqe) -> Entry {
 }
 
 pub struct CompletionRef {
-    inner: KernelOwned<Checker>,
+    inner: KernelOwned<Mutex<CompletionState>, Checker>,
 }
 
 impl CompletionRef {
     pub fn new() -> Self {
         Self {
-            inner: KernelOwned::new(Checker::new()),
+            inner: KernelOwned::new(Mutex::new(CompletionState::Unsubmitted), Checker::new()),
         }
     }
 }
@@ -103,8 +103,8 @@ pub fn process_uring() {
 pub fn set_result(user_data: u64, result: i32) {
     // drop locks before waking up the waker - https://users.rust-lang.org/t/should-locks-be-dropped-before-calling-waker-wake/53057
     let prev_state = {
-        let what = KernelOwned::from_user_data(user_data);
-        let mut lock = what.state().try_lock().unwrap();
+        let what = KernelOwned::<Mutex<CompletionState>, ()>::from_user_data(user_data);
+        let mut lock = what.header_inner().try_lock().unwrap();
         let prev_state = std::mem::replace(&mut *lock, CompletionState::Completed { result });
         prev_state
     };
@@ -162,7 +162,7 @@ impl Future for Fut<'_> {
         mut self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Self::Output> {
-        let lock = self.state.inner.state().try_lock().unwrap();
+        let lock = self.state.inner.header_inner().try_lock().unwrap();
 
         match &*lock {
             CompletionState::Unsubmitted => {
@@ -188,12 +188,12 @@ impl Future for Fut<'_> {
                 }
 
                 // never build twice!
-                let user_data = self.state.inner.place_in_kernel();
+                let user_data = self.state.inner.place_clone_in_kernel();
                 let entry = to_entry(self.inner.build(user_data));
                 RING.with_borrow_mut(|ring| unsafe { ring.submission().push(&entry) })
                     .unwrap();
 
-                let mut lock = self.state.inner.state().try_lock().unwrap();
+                let mut lock = self.state.inner.header_inner().try_lock().unwrap();
                 *lock = CompletionState::InProgress {
                     waker: cx.waker().clone(),
                 };
