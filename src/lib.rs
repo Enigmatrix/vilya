@@ -121,7 +121,7 @@ impl<'a> Read<'a> {
         Self { fd, buf, offset }
     }
 
-    pub fn build(&self, inner: &CompletionRef) -> io_uring_sqe {
+    pub fn build(&self, user_data: u64) -> io_uring_sqe {
         let mut sqe: io_uring_sqe = Default::default();
         sqe.opcode = IORING_OP_READ as _;
         sqe.fd = self.fd; // TODO this could be fixed fd as well
@@ -132,8 +132,7 @@ impl<'a> Read<'a> {
         // sqe.__bindgen_anon_3.rw_flags = rw_flags;
         // sqe.__bindgen_anon_4.buf_group = buf_group;
 
-        let state_clone = inner.inner.clone();
-        sqe.user_data = state_clone.to_user_data();
+        sqe.user_data = user_data;
 
         sqe
     }
@@ -189,7 +188,8 @@ impl Future for Fut<'_> {
                 }
 
                 // never build twice!
-                let entry = to_entry(self.inner.build(&self.state));
+                let user_data = self.state.inner.place_in_kernel();
+                let entry = to_entry(self.inner.build(user_data));
                 RING.with_borrow_mut(|ring| unsafe { ring.submission().push(&entry) })
                     .unwrap();
 

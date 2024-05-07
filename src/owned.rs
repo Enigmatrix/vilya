@@ -72,8 +72,13 @@ impl<T> KernelOwned<T> {
 
     pub fn to_user_data(self) -> u64 {
         let ptr = self.ptr.as_ptr() as u64;
-        mem::forget(self);
+        mem::forget(self); // will be dropped kernel-side instead
         ptr
+    }
+
+    pub fn place_in_kernel(&self) -> u64 {
+        let clone = self.clone();
+        clone.to_user_data()
     }
 }
 
